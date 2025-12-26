@@ -1,0 +1,9 @@
+{
+  "name": "dukascopy-api",
+  "version": "1.0.0",
+  "description": "Cross-platform Node.js CLI for JForex websocket+REST server",
+  "bin": {
+    "dukascopy-api": "bin/dukascopy-api.js"
+  },
+  "license": "MIT"
+}

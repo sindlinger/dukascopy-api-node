@@ -10,8 +10,17 @@ Uso (WSL/Linux):
   chmod +x dukascopy-api.js
   ./dukascopy-api.js help
 
+
+
 Uso (Windows):
   node dukascopy-api.js help
+
+Carregando variáveis de ambiente:
+
+set -a
+source .env
+set +a
+
 
 Config:
   node dukascopy-api.js config init

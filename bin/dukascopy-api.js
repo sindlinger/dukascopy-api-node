@@ -527,12 +527,19 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+
 async function cmd_server(sub, cliOpts, cfgPath) {
   const baseDir = process.cwd();
   const rt = runtimeDirs(baseDir);
   mkdirp(rt.run); mkdirp(rt.log);
 
   const envPath = path.join(baseDir, '.env');
+  const envText = readFileSafe(envPath) || '';
+  const envFromFile = envText ? parseDotEnv(envText) : {};
+
+  // default port/address for all subcommands
+  const port = parseInt(cliOpts.port || process.env.SERVER_PORT || envFromFile.SERVER_PORT || '8080', 10) || 8080;
+  const address = cliOpts.address || process.env.SERVER_ADDRESS || envFromFile.SERVER_ADDRESS || '';
 
   if (sub === 'env') {
     const tpl =
@@ -547,6 +554,9 @@ JFOREX_BOOK_DEPTH=10
 # Porta/Bind do Spring
 SERVER_PORT=8080
 # SERVER_ADDRESS=0.0.0.0
+
+# Opcional: se o servidor estiver fora do WSL e o cliente dentro do WSL, ajuste o host de probe
+# HOST_OVERRIDE=127.0.0.1
 `;
     const out = path.join(baseDir, '.env.example');
     writeFileSafe(out, tpl);
@@ -555,15 +565,24 @@ SERVER_PORT=8080
   }
 
   const jar = cliOpts.jar || findServerJarInDir(baseDir);
-  if (!jar) die('Não encontrei jforex-websocket-api-*.jar na pasta. Use --jar <path> ou copie o JAR para a pasta atual.');
 
-  const envFromFile = readFileSafe(envPath) ? parseDotEnv(readFileSafe(envPath)) : {};
-  const port = parseInt(cliOpts.port || process.env.SERVER_PORT || envFromFile.SERVER_PORT || '8080', 10) || 8080;
-  const address = cliOpts.address || process.env.SERVER_ADDRESS || envFromFile.SERVER_ADDRESS || '';
+  // helper: probe REST to detect unmanaged running server
+  async function probeRunning() {
+    const hostProbe = cliOpts.probeHost || envFromFile.HOST_OVERRIDE || '127.0.0.1';
+    const probeUrl = `http://${hostProbe}:${port}/api/instruments`;
+    const r = await httpRequest('GET', probeUrl, {}, null, 1200).catch(() => null);
+    return { ok: !!(r && r.status > 0), status: r ? r.status : 0, url: probeUrl };
+  }
 
   if (sub === 'status') {
     const pid = serverReadPid(rt.pid);
-    if (pid && pidAlive(pid)) console.log(`RUNNING pid=${pid}`);
+    if (pid && pidAlive(pid)) {
+      console.log(`RUNNING (managed) pid=${pid} port=${port}`);
+      return;
+    }
+    // no pid or dead pid -> probe
+    const pr = await probeRunning();
+    if (pr.ok) console.log(`RUNNING (unmanaged) port=${port} probe=${pr.status}`);
     else console.log('STOPPED');
     return;
   }
@@ -574,6 +593,7 @@ SERVER_PORT=8080
     const content = readFileSafe(rt.logFile) || '';
     console.log(tailLines(content, n));
     if (!follow) return;
+
     let lastSize = fs.existsSync(rt.logFile) ? fs.statSync(rt.logFile).size : 0;
     setInterval(() => {
       if (!fs.existsSync(rt.logFile)) return;
@@ -590,32 +610,92 @@ SERVER_PORT=8080
   }
 
   if (sub === 'down') {
+    // First try managed pidfile
     const pid = serverReadPid(rt.pid);
-    if (!pid) { console.log('OK (sem pid)'); return; }
-    if (!pidAlive(pid)) { fs.unlinkSync(rt.pid); console.log('OK'); return; }
+    if (pid && pidAlive(pid)) {
+      if (isWindows()) {
+        await new Promise((res) => {
+          const p = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+          p.on('exit', () => res());
+          p.on('error', () => res());
+        });
+      } else {
+        try { process.kill(pid, 'SIGTERM'); } catch {}
+        await new Promise(r => setTimeout(r, 800));
+        if (pidAlive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      }
+      try { fs.unlinkSync(rt.pid); } catch {}
+      console.log('OK (killed managed pid)');
+      return;
+    }
+
+    // If no pidfile, attempt best-effort kill by port (unmanaged)
+    const pr = await probeRunning();
+    if (!pr.ok) {
+      try { if (fs.existsSync(rt.pid)) fs.unlinkSync(rt.pid); } catch {}
+      console.log('OK (sem pid; nada respondendo no probe)');
+      return;
+    }
 
     if (isWindows()) {
-      // taskkill for tree
-      await new Promise((res) => {
-        const p = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
-        p.on('exit', () => res());
-        p.on('error', () => res());
-      });
+      let out = '';
+      try {
+        out = require('child_process').execSync(`netstat -ano -p tcp | findstr :${port}`, { encoding: 'utf8' });
+      } catch {
+        console.log('RUNNING (unmanaged). Não consegui identificar PID via netstat. Encerre manualmente.');
+        return;
+      }
+      const pids = new Set();
+      for (const line of out.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) continue;
+        if (!t.toUpperCase().includes('LISTENING')) continue;
+        const parts = t.split(/\s+/);
+        const pid2 = parts[parts.length - 1];
+        const n = parseInt(pid2, 10);
+        if (Number.isFinite(n)) pids.add(n);
+      }
+      if (!pids.size) {
+        console.log('RUNNING (unmanaged). Não encontrei PID LISTENING para a porta. Encerre manualmente.');
+        return;
+      }
+      for (const pidX of pids) {
+        await new Promise((res) => {
+          const p = spawn('taskkill', ['/PID', String(pidX), '/T', '/F'], { stdio: 'ignore' });
+          p.on('exit', () => res());
+          p.on('error', () => res());
+        });
+      }
+      console.log('OK (killed unmanaged by port)');
+      return;
     } else {
-      try { process.kill(pid, 'SIGTERM'); } catch {}
-      await new Promise(r => setTimeout(r, 800));
-      if (pidAlive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      const { execSync } = require('child_process');
+      try {
+        execSync(`fuser -k ${port}/tcp`, { stdio: 'ignore' });
+        console.log('OK (killed unmanaged by port)');
+        return;
+      } catch {
+        try {
+          const pids = execSync(`lsof -t -i tcp:${port}`, { encoding: 'utf8' }).trim().split(/\s+/).filter(Boolean);
+          for (const pidX of pids) {
+            try { process.kill(parseInt(pidX, 10), 'SIGKILL'); } catch {}
+          }
+          if (pids.length) { console.log('OK (killed unmanaged by port)'); return; }
+        } catch {}
+        console.log('RUNNING (unmanaged). Não consegui matar por porta (fuser/lsof ausentes). Encerre manualmente.');
+        return;
+      }
     }
-    try { fs.unlinkSync(rt.pid); } catch {}
-    console.log('OK');
-    return;
+  }
+
+  if (!jar && (sub === 'up' || sub === 'run')) {
+    die('Não encontrei jforex-websocket-api-*.jar na pasta. Use --jar <path> ou copie o JAR para a pasta atual.');
   }
 
   if (sub === 'run') {
     banner();
     const args = ['-jar', jar, `--server.port=${port}`];
     if (address) args.push(`--server.address=${address}`);
-    // extra spring args after --
     const dd = cliOpts['--'] || [];
     args.push(...dd);
     const childEnv = { ...process.env, ...envFromFile };
@@ -625,21 +705,18 @@ SERVER_PORT=8080
   }
 
   if (sub === 'up') {
-    // already running?
     const pid0 = serverReadPid(rt.pid);
     if (pid0 && pidAlive(pid0)) { console.log(`OK (já rodando pid=${pid0})`); return; }
     if (pid0 && !pidAlive(pid0)) { try { fs.unlinkSync(rt.pid); } catch {} }
 
     if (!envFromFile.JFOREX_USER || !envFromFile.JFOREX_PASS) {
-      warn('JFOREX_USER/JFOREX_PASS não estão no .env (o servidor pode subir, mas não vai gerar dados dukascopy-api).');
+      warn('JFOREX_USER/JFOREX_PASS não estão no .env (o servidor pode subir, mas não vai gerar dados Dukascopy).');
     }
 
-    // clear log
     writeFileSafe(rt.logFile, '');
 
     const args = ['-jar', jar, `--server.port=${port}`];
     if (address) args.push(`--server.address=${address}`);
-
     const dd = cliOpts['--'] || [];
     args.push(...dd);
 
@@ -655,22 +732,15 @@ SERVER_PORT=8080
     child.unref();
     fs.writeFileSync(rt.pid, String(child.pid), 'utf8');
 
-    // wait for REST to respond
-    const hostProbe = cliOpts.probeHost || envFromFile.HOST_OVERRIDE || '127.0.0.1';
-    const probeUrl = `http://${hostProbe}:${port}/api/instruments`;
-    let ok = false;
-    for (let i = 0; i < 60; i++) {
-      const r = await httpRequest('GET', probeUrl, {}, null, 1200).catch(() => null);
-      if (r && r.status > 0) { ok = true; break; }
-      await new Promise(r => setTimeout(r, 250));
-    }
-    if (!ok) warn(`Servidor não respondeu no probe ${probeUrl}. Veja: dukascopy-api server logs --follow`);
+    const pr = await probeRunning();
+    if (!pr.ok) warn(`Servidor não respondeu no probe ${pr.url}. Veja: server logs --follow`);
     console.log(`OK (pid=${child.pid}, log=${rt.logFile})`);
     return;
   }
 
   die(`server subcomando desconhecido: ${sub}`);
 }
+
 
 async function cmd_instruments(sub, cliOpts, cfgPath) {
   const { data } = loadConfig(cfgPath);

@@ -1,40 +1,40 @@
-# dukascopy-cli (Node.js)
+# dukascopy-api (Node.js)
 
-Arquivo único: `dukascopy-cli.js` (sem dependências npm).
+Arquivo único: `dukascopy-api.js` (sem dependências npm).
 
 Requisitos:
 - Node 18+
 - Java (apenas se você usar `server up/run`)
 
 Uso (WSL/Linux):
-  chmod +x dukascopy-cli.js
-  ./dukascopy-cli.js help
+  chmod +x dukascopy-api.js
+  ./dukascopy-api.js help
 
 Uso (Windows):
-  node dukascopy-cli.js help
+  node dukascopy-api.js help
 
 Config:
-  node dukascopy-cli.js config init
-  node dukascopy-cli.js config set host http://localhost:8080
-  node dukascopy-cli.js config set ws ws://localhost:8080/ws/market
+  node dukascopy-api.js config init
+  node dukascopy-api.js config set host http://localhost:8080
+  node dukascopy-api.js config set ws ws://localhost:8080/ws/market
 
 REST:
-  node dukascopy-cli.js instruments list
-  node dukascopy-cli.js orderbook top --instrument EURUSD
-  node dukascopy-cli.js history bars --instrument EUR/USD --period M1 --minutes 60
+  node dukascopy-api.js instruments list
+  node dukascopy-api.js orderbook top --instrument EURUSD
+  node dukascopy-api.js history bars --instrument EUR/USD --period M1 --minutes 60
 
 WebSocket:
-  node dukascopy-cli.js ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
-  node dukascopy-cli.js ws stats --duration 30
+  node dukascopy-api.js ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+  node dukascopy-api.js ws stats --duration 30
 
 Servidor:
-  node dukascopy-cli.js server env          (gera .env.example na pasta atual)
-  node dukascopy-cli.js server up --port 8080
-  node dukascopy-cli.js server logs --n 200 --follow
-  node dukascopy-cli.js server down
+  node dukascopy-api.js server env          (gera .env.example na pasta atual)
+  node dukascopy-api.js server up --port 8080
+  node dukascopy-api.js server logs --n 200 --follow
+  node dukascopy-api.js server down
 
 MT5 (exporta EA+Indicador WS->GV):
-  node dukascopy-cli.js mt5 export --out ./mt5
+  node dukascopy-api.js mt5 export --out ./mt5
 
 Observação:
 - O WebSocket do seu servidor (pelos seus fontes) é `/ws/market`.

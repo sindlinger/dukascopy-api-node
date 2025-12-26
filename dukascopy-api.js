@@ -2,7 +2,7 @@
 'use strict';
 
 /*
-  dukascopy.js — robust cross-platform CLI (Node.js) for your JForex WS+REST server.
+  dukascopy-cli.js — robust cross-platform CLI (Node.js) for your JForex WS+REST server.
 
   Features:
   - REST: instruments, orderbook, history
@@ -30,7 +30,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const APP = {
-  name: 'dukascopy',
+  name: 'dukascopy-cli',
   version: '1.0.0',
   author: 'Eduardo Candeia Gonçalves'
 };
@@ -72,14 +72,14 @@ function tailLines(text, n) {
 }
 
 // -------- Config paths --------
-// Linux/WSL: ~/.config/dukascopy/config.json
-// Windows: %APPDATA%\dukascopy\config.json
+// Linux/WSL: ~/.config/dukascopy-cli/config.json
+// Windows: %APPDATA%\dukascopy-cli\config.json
 function defaultConfigPath() {
   if (isWindows()) {
     const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'dukascopy', 'config.json');
+    return path.join(appData, 'dukascopy-cli', 'config.json');
   }
-  return path.join(os.homedir(), '.config', 'dukascopy', 'config.json');
+  return path.join(os.homedir(), '.config', 'dukascopy-cli', 'config.json');
 }
 
 function loadConfig(cfgPath) {
@@ -400,7 +400,7 @@ async function wsConnect(wsUrl, onMessage, onEvent) {
 // -------- Commands --------
 function help() {
   console.log(`Uso:
-  dukascopy.js [--config <path>] [--host <url>] [--ws <wsurl>] <comando> ...
+  dukascopy-cli.js [--config <path>] [--host <url>] [--ws <wsurl>] <comando> ...
 
 Comandos:
   config   init|show|get|set|path
@@ -415,13 +415,13 @@ Comandos:
   mt5         export
 
 Exemplos:
-  node dukascopy.js config init
-  node dukascopy.js config set host http://localhost:8080
-  node dukascopy.js config set ws ws://localhost:8080/ws/market
+  node dukascopy-cli.js config init
+  node dukascopy-cli.js config set host http://localhost:8080
+  node dukascopy-cli.js config set ws ws://localhost:8080/ws/market
 
-  node dukascopy.js instruments list
-  node dukascopy.js orderbook top --instrument EURUSD
-  node dukascopy.js ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+  node dukascopy-cli.js instruments list
+  node dukascopy-cli.js orderbook top --instrument EURUSD
+  node dukascopy-cli.js ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
 `);
 }
 
@@ -536,7 +536,7 @@ async function cmd_server(sub, cliOpts, cfgPath) {
 
   if (sub === 'env') {
     const tpl =
-`# Credenciais Dukascopy / JForex
+`# Credenciais Dukascopy-cli / JForex
 JFOREX_USER=SEU_USER
 JFOREX_PASS=SUA_SENHA
 
@@ -631,7 +631,7 @@ SERVER_PORT=8080
     if (pid0 && !pidAlive(pid0)) { try { fs.unlinkSync(rt.pid); } catch {} }
 
     if (!envFromFile.JFOREX_USER || !envFromFile.JFOREX_PASS) {
-      warn('JFOREX_USER/JFOREX_PASS não estão no .env (o servidor pode subir, mas não vai gerar dados Dukascopy).');
+      warn('JFOREX_USER/JFOREX_PASS não estão no .env (o servidor pode subir, mas não vai gerar dados Dukascopy-cli).');
     }
 
     // clear log
@@ -664,7 +664,7 @@ SERVER_PORT=8080
       if (r && r.status > 0) { ok = true; break; }
       await new Promise(r => setTimeout(r, 250));
     }
-    if (!ok) warn(`Servidor não respondeu no probe ${probeUrl}. Veja: dukascopy server logs --follow`);
+    if (!ok) warn(`Servidor não respondeu no probe ${probeUrl}. Veja: dukascopy-cli server logs --follow`);
     console.log(`OK (pid=${child.pid}, log=${rt.logFile})`);
     return;
   }
@@ -983,15 +983,15 @@ async function cmd_mt5(sub, cliOpts) {
   const ind = MT5_IND_SOURCE;
   if (!ea || !ind) die('Fonte do EA/Indicador não embutida nesta build.');
 
-  writeFileSafe(path.join(expertsDir, 'DUKASCOPY_WS_Service_EA.mq5'), ea);
-  writeFileSafe(path.join(indDir, 'DUKASCOPY_L2_VolumeProfile_GV.mq5'), ind);
+  writeFileSafe(path.join(expertsDir, 'DUKASCOPY-CLI_WS_Service_EA.mq5'), ea);
+  writeFileSafe(path.join(indDir, 'DUKASCOPY-CLI_L2_VolumeProfile_GV.mq5'), ind);
 
   console.log(out);
 }
 
 // -------- Embedded MT5 sources (optional) --------
 const MT5_EA_SOURCE = `//+------------------------------------------------------------------+
-//| DUKASCOPY_WS_Service_EA.mq5                                           |
+//| DUKASCOPY-CLI_WS_Service_EA.mq5                                           |
 //| EA servico: conecta no WebSocket do servidor e publica L2 em      |
 //| Global Variables do Terminal.                                     |
 //|                                                                  |
@@ -1008,7 +1008,7 @@ input int    Depth            = 10;            // niveis por lado
 input int    TimerMs          = 20;            // loop
 input bool   VerboseLog       = false;
 
-string GVPrefix(const string inst) { return "DUKASCOPY."+inst+"."; }
+string GVPrefix(const string inst) { return "DUKASCOPY-CLI."+inst+"."; }
 
 int    g_sock=-1;
 string g_host="";
@@ -1394,7 +1394,7 @@ void OnTimer()
 //+------------------------------------------------------------------+
 `;
 const MT5_IND_SOURCE = `//+------------------------------------------------------------------+
-//| DUKASCOPY_L2_VolumeProfile_GV.mq5                                     |
+//| DUKASCOPY-CLI_L2_VolumeProfile_GV.mq5                                     |
 //| Indicador: apenas plota. Lê L2 via Global Variables do Terminal.  |
 //+------------------------------------------------------------------+
 #property indicator_chart_window
@@ -1430,7 +1430,7 @@ double g_lastAsk=0.0;
 double g_lastSeq=-1.0;
 
 string NormalizeInst(string s){ StringReplace(s,"/",""); return s; }
-string GVPrefix(const string inst){ return "DUKASCOPY."+inst+"."; }
+string GVPrefix(const string inst){ return "DUKASCOPY-CLI."+inst+"."; }
 
 int FindKeyIndex(const long key)
 {

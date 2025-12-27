@@ -1,49 +1,77 @@
-# dukascopy-api (Node.js)
+# dukascopy-api (Node.js CLI)
 
-Arquivo único: `dukascopy-api.js` (sem dependências npm).
+Instalação via npm (Windows e WSL/Linux):
+1) Entre na pasta
+2) Rode:
 
-Requisitos:
-- Node 18+
-- Java (apenas se você usar `server up/run`)
+    npm install -g .
 
-Uso (WSL/Linux):
-  chmod +x dukascopy-api.js
-  ./dukascopy-api.js help
+Isso cria o comando `dukascopy-api` no PATH (no Windows o npm cria um `.cmd` automaticamente).
 
+Uso local (sem instalar globalmente):
+    node ./dukascopy-api.js <comando> ...
 
+Distribuição (release):
+    npm run release
 
-Uso (Windows):
-  node dukascopy-api.js help
+Instalação a partir do release:
+    npm install -g ./dist/release
 
-Carregando variáveis de ambiente:
+Se preferir um arquivo instalável:
+    (cd dist/release && npm pack)
+    npm install -g ./dist/release/dukascopy-api-1.0.0.tgz
 
-set -a
-source .env
-set +a
+Docker (imagem para servidor):
+1) Copie o arquivo de exemplo e edite credenciais (no host):
+    cp .env.example .env
+    dukascopy-api server set --user SEU_USER --pass SUA_SENHA --jnlp URL --instruments EUR/USD,USD/JPY
 
+2) (Opcional) Centralize o .env fora do projeto:
+    export DUKASCOPY_ENV_FILE=~/.config/dukascopy-api/.env
+    # ou um caminho absoluto de sua preferência
 
-Config:
-  node dukascopy-api.js config init
-  node dukascopy-api.js config set host http://localhost:8080
-  node dukascopy-api.js config set ws ws://localhost:8080/ws/market
+3) Suba o container:
+    docker compose up -d --build
 
-REST:
-  node dukascopy-api.js instruments list
-  node dukascopy-api.js orderbook top --instrument EURUSD
-  node dukascopy-api.js history bars --instrument EUR/USD --period M1 --minutes 60
+3) Logs e status:
+    docker compose logs -f
+    docker compose down
 
-WebSocket:
-  node dukascopy-api.js ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
-  node dukascopy-api.js ws stats --duration 30
+CLI fora do container (recomendado):
+    npm install -g .
+    dukascopy-api config set host http://localhost:8080
+    dukascopy-api config set ws ws://localhost:8080/ws/market
+
+Alias opcional (CLI dentro do container):
+    dukascopy-api-docker() { docker compose exec dukascopy-api-node dukascopy-api --host http://127.0.0.1:8080 --ws ws://127.0.0.1:8080/ws/market "$@"; }
+
+Se o demo expirar, atualize credenciais e reinicie o container:
+    dukascopy-api server set --user NOVO_USER --pass NOVA_SENHA
+    docker compose up -d --force-recreate
+
+Exemplos:
+    dukascopy-api config init
+    dukascopy-api config set host http://localhost:8080
+    dukascopy-api config set ws ws://localhost:8080/ws/market
 
 Servidor:
-  node dukascopy-api.js server env          (gera .env.example na pasta atual)
-  node dukascopy-api.js server up --port 8080
-  node dukascopy-api.js server logs --n 200 --follow
-  node dukascopy-api.js server down
+    dukascopy-api server env
+    dukascopy-api server set --user SEU_USER --pass SUA_SENHA
+    dukascopy-api server up --port 8080
+    dukascopy-api server status
+    dukascopy-api server logs --n 200 --follow
+    dukascopy-api server down
 
-MT5 (exporta EA+Indicador WS->GV):
-  node dukascopy-api.js mt5 export --out ./mt5
+Arquivo .env (centralizado):
+- Linux/WSL: ~/.config/dukascopy-api/.env
+- Windows: %APPDATA%\\dukascopy-api\\.env
 
-Observação:
-- O WebSocket do seu servidor (pelos seus fontes) é `/ws/market`.
+Override de caminho:
+- DUKASCOPY_ENV_PATH ou DUKASCOPY_ENV_FILE (caminho absoluto)
+
+O comando `server set` sempre grava nesse .env global. Se existir um .env local no projeto,
+ele também é atualizado para manter Docker/compose em sincronia.
+
+Diferença importante:
+- RUNNING (managed): servidor iniciado por `server up` (pidfile existe)
+- RUNNING (unmanaged): porta responde, mas não há pidfile (iniciado fora do CLI)

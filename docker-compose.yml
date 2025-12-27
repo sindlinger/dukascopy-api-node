@@ -1,0 +1,14 @@
+services:
+  dukascopy-api-node:
+    image: sindlinger/dukascopy-api-node:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - ${DUKASCOPY_ENV_FILE:-./.env}
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      DUKASCOPY_ENV_PATH: /config/.env
+    volumes:
+      - ${DUKASCOPY_ENV_FILE:-./.env}:/config/.env:ro

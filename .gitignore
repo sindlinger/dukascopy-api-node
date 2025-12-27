@@ -1,1 +1,6 @@
+.env
+.env.bak
+.runtime/
+dist/
+mt5/cli-duka-account
 jforex-websocket-api-1.0.0.jar

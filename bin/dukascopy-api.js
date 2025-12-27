@@ -82,6 +82,38 @@ function defaultConfigPath() {
   return path.join(os.homedir(), '.config', 'dukascopy-api', 'config.json');
 }
 
+function defaultEnvPath() {
+  if (isWindows()) {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, 'dukascopy-api', '.env');
+  }
+  return path.join(os.homedir(), '.config', 'dukascopy-api', '.env');
+}
+
+function expandHome(p) {
+  if (!p) return p;
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+function resolveEnvPath() {
+  const override = process.env.DUKASCOPY_ENV_PATH || process.env.DUKASCOPY_ENV_FILE;
+  return expandHome(override) || defaultEnvPath();
+}
+
+function loadEnvFiles(baseDir) {
+  const userPath = resolveEnvPath();
+  const localPath = path.join(baseDir, '.env');
+  const userText = readFileSafe(userPath) || '';
+  const localText = readFileSafe(localPath) || '';
+  const user = userText ? parseDotEnv(userText) : {};
+  const local = localText ? parseDotEnv(localText) : {};
+  const merged = { ...process.env, ...local, ...user };
+  const primaryPath = Object.keys(user).length ? userPath : localPath;
+  return { userPath, localPath, user, local, merged, primaryPath };
+}
+
 function loadConfig(cfgPath) {
   const p = cfgPath || defaultConfigPath();
   const raw = readFileSafe(p);
@@ -113,6 +145,40 @@ function parseDotEnv(text) {
     env[k] = v;
   }
   return env;
+}
+
+function serializeDotEnv(env) {
+  const lines = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined || v === null) continue;
+    lines.push(`${k}=${v}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+function splitList(value) {
+  if (!value) return [];
+  return String(value).split(/[;,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function normalizePathForPlatform(p) {
+  if (!p) return p;
+  const s = String(p).trim();
+  if (!s) return s;
+  // Convert Windows path to WSL path if running on non-Windows
+  if (!isWindows() && /^[A-Za-z]:[\\/]/.test(s)) {
+    const drive = s[0].toLowerCase();
+    const rest = s.slice(2).replace(/\\/g, '/');
+    return `/mnt/${drive}${rest.startsWith('/') ? '' : '/'}${rest}`;
+  }
+  return s;
+}
+
+function ensureMql5Dir(p) {
+  const base = normalizePathForPlatform(p);
+  if (!base) return base;
+  const name = path.basename(base).toLowerCase();
+  return name === 'mql5' ? base : path.join(base, 'MQL5');
 }
 
 // -------- Utility: args parsing (minimal) --------
@@ -397,38 +463,711 @@ async function wsConnect(wsUrl, onMessage, onEvent) {
   };
 }
 
-// -------- Commands --------
-function help() {
+// -------- Help --------
+function useColor() {
+  if (process.env.NO_COLOR) return false;
+  return !!process.stdout.isTTY;
+}
+
+function printTable(rows, opts = {}) {
+  const indent = opts.indent ?? 2;
+  const gap = opts.gap ?? 2;
+  const pad = (s, n) => s.padEnd(n, ' ');
+  const colorOn = useColor();
+  const cmdColor = '\x1b[36m'; // cyan
+  const reset = '\x1b[0m';
+  const col1 = Math.max(...rows.map(r => r[0].length));
+  const col2 = Math.max(...rows.map(r => r[1].length));
+  for (const r of rows) {
+    const raw = r[0];
+    const c1 = colorOn
+      ? `${cmdColor}${raw}${reset}${' '.repeat(col1 - raw.length)}`
+      : pad(raw, col1);
+    const c2 = pad(r[1], col2);
+    const c3 = r[2] || '';
+    console.log(`${' '.repeat(indent)}${c1}${' '.repeat(gap)}${c2}${' '.repeat(gap)}${c3}`);
+  }
+}
+
+function printSection(title, rows) {
+  if (!rows || !rows.length) return;
+  console.log(`\n${title}:`);
+  printTable(rows);
+}
+
+function helpHeader() {
+  console.log(`${APP.name} v${APP.version} — ${APP.author}`);
+}
+
+const SUBCOMMANDS = {
+  config: [
+    ['init', 'Cria um config padrão', ''],
+    ['show', 'Mostra o config atual', ''],
+    ['get', 'Lê uma chave', ''],
+    ['set', 'Define uma chave', ''],
+    ['path', 'Caminho do config', '']
+  ],
+  server: [
+    ['env', 'Gera .env.example', ''],
+    ['set', 'Atualiza o .env', ''],
+    ['up', 'Inicia (background)', ''],
+    ['down', 'Encerra', ''],
+    ['status', 'Status', ''],
+    ['logs', 'Logs do servidor', ''],
+    ['run', 'Inicia em foreground', '']
+  ],
+  instruments: [
+    ['list', 'Lista instrumentos', ''],
+    ['set', 'Define lista completa', ''],
+    ['add', 'Adiciona instrumentos', ''],
+    ['remove', 'Remove instrumentos', '']
+  ],
+  orderbook: [
+    ['latest', 'Snapshot completo', ''],
+    ['top', 'Best bid/ask', ''],
+    ['levels', 'N níveis do book', ''],
+    ['watch', 'Loop periódico', '']
+  ],
+  history: [
+    ['bars', 'Retorna JSON', ''],
+    ['csv', 'Exporta CSV', '']
+  ],
+  ws: [
+    ['tail', 'Imprime mensagens', ''],
+    ['stats', 'Contagem de msgs', ''],
+    ['dump', 'Salva em arquivo', '']
+  ],
+  json: [
+    ['pretty', 'Formata JSON', ''],
+    ['get', 'Extrai campo', '']
+  ],
+  mt5: [
+    ['export', 'Exporta EA/Indicador', '']
+  ]
+};
+
+function helpRoot() {
+  helpHeader();
   console.log(`Uso:
-  dukascopy-api.js [--config <path>] [--host <url>] [--ws <wsurl>] <comando> ...
+  dukascopy-api [--config <path>] [--host <url>] [--ws <wsurl>] <comando> ...
+  node ./dukascopy-api.js [--config <path>] [--host <url>] [--ws <wsurl>] <comando> ...
 
-Comandos:
-  config   init|show|get|set|path
-  doctor
-  server   env|up|down|status|logs|run
-  instruments list|set|add|remove
-  orderbook   latest|top|levels|watch
-  history     bars|csv
-  ws          tail|stats|dump
-  raw         --method GET --url <url> [--body <json>]
-  json        pretty|get
-  mt5         export
-
-Exemplos:
-  node dukascopy-api.js config init
-  node dukascopy-api.js config set host http://localhost:8080
-  node dukascopy-api.js config set ws ws://localhost:8080/ws/market
-
-  node dukascopy-api.js instruments list
-  node dukascopy-api.js orderbook top --instrument EURUSD
-  node dukascopy-api.js ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+Comandos (descrição):
+`);
+  printTable([
+    ['config', 'Gerencia host/ws e arquivo de configuração do CLI.', ''],
+    ['doctor', 'Testa conectividade REST e WebSocket.', ''],
+    ['server', 'Sobe, derruba e inspeciona o servidor JForex.', ''],
+    ['instruments', 'Lista e define instrumentos ativos no servidor.', ''],
+    ['orderbook', 'Consulta o orderbook (snapshot, níveis, watch).', ''],
+    ['history', 'Baixa histórico (JSON/CSV) com filtros de tempo.', ''],
+    ['ws', 'Acompanha o WebSocket (tail, stats, dump).', ''],
+    ['raw', 'Faz requisição HTTP direta para qualquer endpoint.', ''],
+    ['json', 'Formata JSON ou extrai campos com path.', ''],
+    ['mt5', 'Exporta EA/Indicador para o MetaTrader 5.', ''],
+    ['help', 'Mostra ajuda detalhada de comandos.', '']
+  ]);
+  printSection('Opções globais', [
+    ['--config <path>', 'Caminho do config do CLI', ''],
+    ['--host <url>', 'Override do host REST', ''],
+    ['--ws <wsurl>', 'Override do WebSocket', '']
+  ]);
+  console.log(`\nExemplos:
+  dukascopy-api config init
+  dukascopy-api config set host http://localhost:8080
+  dukascopy-api config set ws ws://localhost:8080/ws/market
+  dukascopy-api server up --port 8080
+  dukascopy-api instruments list
+  dukascopy-api orderbook top --instrument EURUSD
+  dukascopy-api ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+  dukascopy-api help server env
 `);
 }
 
+function helpConfig(sub) {
+  if (!sub) {
+    helpHeader();
+    console.log(`Uso:
+  dukascopy-api config <subcomando> ...
+
+Subcomandos (descrição):
+`);
+    printTable(SUBCOMMANDS.config);
+    printSection('Chaves suportadas', [
+      ['host', 'Base REST (ex.: http://localhost:8080)', ''],
+      ['ws', 'Endpoint WS (ex.: ws://localhost:8080/ws/market)', '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api config init
+  dukascopy-api config show
+  dukascopy-api config get host
+  dukascopy-api config set host http://localhost:8080
+`);
+    return;
+  }
+  if (sub === 'get') {
+    console.log(`Uso:
+  dukascopy-api config get <chave>
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.config);
+    printSection('Chaves suportadas', [
+      ['host', 'Base REST (ex.: http://localhost:8080)', ''],
+      ['ws', 'Endpoint WS (ex.: ws://localhost:8080/ws/market)', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api config get host
+`);
+    return;
+  }
+  if (sub === 'set') {
+    console.log(`Uso:
+  dukascopy-api config set <chave> <valor>
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.config);
+    printSection('Chaves suportadas', [
+      ['host', 'Base REST (ex.: http://localhost:8080)', ''],
+      ['ws', 'Endpoint WS (ex.: ws://localhost:8080/ws/market)', '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api config set host http://localhost:8080
+  dukascopy-api config set ws ws://localhost:8080/ws/market
+`);
+    return;
+  }
+  console.log(`Uso:
+  dukascopy-api config ${sub}
+`);
+}
+
+function helpDoctor() {
+  helpHeader();
+  console.log(`Uso:
+  dukascopy-api doctor [--host <url>] [--ws <wsurl>]
+
+Descrição:
+  Verifica se REST e WS estão acessíveis no host configurado.
+`);
+  printSection('Opções', [
+    ['--host <url>', 'Override do host REST', ''],
+    ['--ws <wsurl>', 'Override do WebSocket', '']
+  ]);
+  console.log(`\nExemplo:
+  dukascopy-api doctor --host http://localhost:8080 --ws ws://localhost:8080/ws/market
+`);
+}
+
+function helpServer(sub) {
+  if (!sub) {
+    helpHeader();
+    console.log(`Uso:
+  dukascopy-api server <subcomando> [opções]
+
+Subcomandos (descrição):
+`);
+    printTable([
+      ['env', 'Gera um .env.example com variáveis suportadas.', ''],
+      ['set', 'Atualiza o arquivo .env de forma automática.', ''],
+      ['up', 'Inicia o servidor em background (gerenciado).', ''],
+      ['down', 'Encerra o servidor (gerenciado ou por porta).', ''],
+      ['status', 'Mostra o status e o modo (managed/unmanaged).', ''],
+      ['logs', 'Mostra logs e permite seguir em tempo real.', ''],
+      ['run', 'Inicia em foreground (saída direta no terminal).', '']
+    ]);
+    const envPath = resolveEnvPath();
+    const envInfo = process.env.DUKASCOPY_ENV_PATH || process.env.DUKASCOPY_ENV_FILE
+      ? 'Caminho via DUKASCOPY_ENV_PATH/DUKASCOPY_ENV_FILE'
+      : 'Caminho padrão (global)';
+    printSection('Arquivo .env', [
+      [envPath, envInfo, '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api server env
+  dukascopy-api server set --user SEU_USER --pass SUA_SENHA
+  dukascopy-api server up --port 8080
+  dukascopy-api server logs --n 200 --follow
+`);
+    return;
+  }
+  if (sub === 'env') {
+    console.log(`Uso:
+  dukascopy-api server env
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.server);
+    console.log(`\nExemplo:
+  dukascopy-api server env
+`);
+    return;
+  }
+  if (sub === 'set') {
+    console.log(`Uso:
+  dukascopy-api server set [--user <u>] [--pass <p>] [--jnlp <url>] [--instruments <list>]
+                            [--book-depth <n>] [--port <n>] [--address <ip>] [--host-override <host>]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.server);
+    printSection('Opções', [
+      ['--user <u>', 'Usuário JForex', ''],
+      ['--pass <p>', 'Senha JForex', ''],
+      ['--jnlp <url>', 'URL do JNLP', ''],
+      ['--instruments <list>', 'Lista (ex.: EUR/USD,USD/JPY)', ''],
+      ['--book-depth <n>', 'Profundidade do book', ''],
+      ['--port <n>', 'Porta do servidor', ''],
+      ['--address <ip>', 'Bind do servidor', ''],
+      ['--host-override <host>', 'Host para probe status', '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api server set --user SEU_USER --pass SUA_SENHA
+  dukascopy-api server set --instruments EUR/USD,USD/JPY --book-depth 10
+`);
+    return;
+  }
+  if (sub === 'up') {
+    console.log(`Uso:
+  dukascopy-api server up [--port <n>] [--address <ip>] [--jar <path>] [--] <args-java>
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.server);
+    printSection('Opções', [
+      ['--port <n>', 'Porta do servidor', ''],
+      ['--address <ip>', 'Bind do servidor', ''],
+      ['--jar <path>', 'Caminho do JAR', ''],
+      ['-- <args>', 'Args extras para o Java', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api server up --port 8080
+`);
+    return;
+  }
+  if (sub === 'run') {
+    console.log(`Uso:
+  dukascopy-api server run [--port <n>] [--address <ip>] [--jar <path>] [--] <args-java>
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.server);
+    printSection('Opções', [
+      ['--port <n>', 'Porta do servidor', ''],
+      ['--address <ip>', 'Bind do servidor', ''],
+      ['--jar <path>', 'Caminho do JAR', ''],
+      ['-- <args>', 'Args extras para o Java', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api server run --port 8080
+`);
+    return;
+  }
+  if (sub === 'logs') {
+    console.log(`Uso:
+  dukascopy-api server logs [--n <n>] [--follow]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.server);
+    printSection('Opções', [
+      ['--n <n>', 'Número de linhas (default 200)', ''],
+      ['--follow', 'Acompanhar em tempo real', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api server logs --n 200 --follow
+`);
+    return;
+  }
+  if (sub === 'status' || sub === 'down') {
+    console.log(`Uso:
+  dukascopy-api server ${sub}
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.server);
+    console.log(`\nExemplo:
+  dukascopy-api server ${sub}
+`);
+    return;
+  }
+  console.log(`Uso:
+  dukascopy-api server ${sub}
+`);
+  printSection('Subcomandos disponíveis', SUBCOMMANDS.server);
+}
+
+function helpInstruments(sub) {
+  if (!sub) {
+    helpHeader();
+    console.log(`Uso:
+  dukascopy-api instruments <subcomando> [opções]
+
+Subcomandos (descrição):
+`);
+    printTable([
+      ['list', 'Lista instrumentos ativos no servidor.', ''],
+      ['set', 'Define a lista completa de instrumentos.', ''],
+      ['add', 'Adiciona instrumentos à lista atual.', ''],
+      ['remove', 'Remove instrumentos da lista atual.', '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api instruments list
+  dukascopy-api instruments set EUR/USD,USD/JPY
+  dukascopy-api instruments add XAU/USD
+  dukascopy-api instruments remove BTC/USD
+`);
+    return;
+  }
+  if (sub === 'list') {
+    console.log(`Uso:
+  dukascopy-api instruments list [--pretty]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.instruments);
+    printSection('Opções', [
+      ['--pretty', 'Formata a saída JSON', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api instruments list --pretty
+`);
+    return;
+  }
+  if (sub === 'set' || sub === 'add' || sub === 'remove') {
+    console.log(`Uso:
+  dukascopy-api instruments ${sub} <lista>
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.instruments);
+    printSection('Parâmetros', [
+      ['<lista>', 'Ex.: EUR/USD,USD/JPY (separado por vírgula)', '']
+    ]);
+    printSection('Opções', [
+      ['--list <lista>', 'Mesma lista via flag', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api instruments ${sub} EUR/USD,USD/JPY
+`);
+    return;
+  }
+  console.log(`Uso:
+  dukascopy-api instruments ${sub}
+`);
+  printSection('Subcomandos disponíveis', SUBCOMMANDS.instruments);
+}
+
+function helpOrderbook(sub) {
+  if (!sub) {
+    helpHeader();
+    console.log(`Uso:
+  dukascopy-api orderbook <subcomando> [opções]
+
+Subcomandos (descrição):
+`);
+    printTable([
+      ['latest', 'Snapshot completo do orderbook.', ''],
+      ['top', 'Melhor bid/ask e spread.', ''],
+      ['levels', 'Retorna N níveis do book.', ''],
+      ['watch', 'Loop periódico para acompanhar mudanças.', '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api orderbook latest --instrument EUR/USD
+  dukascopy-api orderbook top --instrument EURUSD
+  dukascopy-api orderbook levels --instrument EURUSD --n 10
+  dukascopy-api orderbook watch --instrument EURUSD --every 1000
+`);
+    return;
+  }
+  if (sub === 'latest') {
+    console.log(`Uso:
+  dukascopy-api orderbook latest [--instrument <inst>] [--pretty]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.orderbook);
+    printSection('Opções', [
+      ['--instrument <inst>', 'Instrumento (ex.: EUR/USD)', ''],
+      ['--pretty', 'Formata a saída JSON', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api orderbook latest --instrument EURUSD
+`);
+    return;
+  }
+  if (sub === 'top') {
+    console.log(`Uso:
+  dukascopy-api orderbook top [--instrument <inst>] [--pretty]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.orderbook);
+    printSection('Opções', [
+      ['--instrument <inst>', 'Instrumento (ex.: EUR/USD)', ''],
+      ['--pretty', 'Formata a saída JSON', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api orderbook top --instrument EURUSD
+`);
+    return;
+  }
+  if (sub === 'levels') {
+    console.log(`Uso:
+  dukascopy-api orderbook levels [--instrument <inst>] [--n <n>] [--out <file>] [--pretty]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.orderbook);
+    printSection('Opções', [
+      ['--instrument <inst>', 'Instrumento (ex.: EUR/USD)', ''],
+      ['--n <n>', 'Número de níveis (default 10)', ''],
+      ['--out <file>', 'Salvar em arquivo', ''],
+      ['--pretty', 'Formata a saída JSON', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api orderbook levels --instrument EURUSD --n 10
+`);
+    return;
+  }
+  if (sub === 'watch') {
+    console.log(`Uso:
+  dukascopy-api orderbook watch [--instrument <inst>] [--every <ms>] [--count <n>] [--pretty]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.orderbook);
+    printSection('Opções', [
+      ['--instrument <inst>', 'Instrumento (ex.: EUR/USD)', ''],
+      ['--every <ms>', 'Intervalo em ms (default 1000)', ''],
+      ['--count <n>', 'Quantidade de iterações (0=inf)', ''],
+      ['--pretty', 'Formata a saída JSON', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api orderbook watch --instrument EURUSD --every 1000
+`);
+    return;
+  }
+  console.log(`Uso:
+  dukascopy-api orderbook ${sub}
+`);
+  printSection('Subcomandos disponíveis', SUBCOMMANDS.orderbook);
+}
+
+function helpHistory(sub) {
+  if (!sub) {
+    helpHeader();
+    console.log(`Uso:
+  dukascopy-api history <subcomando> --instrument <inst> [opções]
+
+Subcomandos (descrição):
+`);
+    printTable([
+      ['bars', 'Retorna histórico em JSON.', ''],
+      ['csv', 'Exporta histórico em CSV.', '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api history bars --instrument EUR/USD --minutes 60
+  dukascopy-api history csv --instrument EUR/USD --minutes 60 --out bars.csv
+`);
+    return;
+  }
+  if (sub === 'bars') {
+    console.log(`Uso:
+  dukascopy-api history bars --instrument <inst> [--from <ms>] [--to <ms>] [--minutes <n>]
+                               [--period M1|M5|H1] [--side BID|ASK] [--pretty]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.history);
+    printSection('Opções', [
+      ['--instrument <inst>', 'Obrigatório (ex.: EUR/USD)', ''],
+      ['--from <ms>', 'Epoch ms inicial', ''],
+      ['--to <ms>', 'Epoch ms final', ''],
+      ['--minutes <n>', 'Alternativa a from/to', ''],
+      ['--period M1|M5|H1', 'Período (default M1)', ''],
+      ['--side BID|ASK', 'Lado (default BID)', ''],
+      ['--pretty', 'Formata a saída JSON', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api history bars --instrument EUR/USD --minutes 60
+`);
+    return;
+  }
+  if (sub === 'csv') {
+    console.log(`Uso:
+  dukascopy-api history csv --instrument <inst> [--from <ms>] [--to <ms>] [--minutes <n>]
+                               [--period M1|M5|H1] [--side BID|ASK] [--fields a,b,c] [--out <file>]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.history);
+    printSection('Opções', [
+      ['--instrument <inst>', 'Obrigatório (ex.: EUR/USD)', ''],
+      ['--from <ms>', 'Epoch ms inicial', ''],
+      ['--to <ms>', 'Epoch ms final', ''],
+      ['--minutes <n>', 'Alternativa a from/to', ''],
+      ['--period M1|M5|H1', 'Período (default M1)', ''],
+      ['--side BID|ASK', 'Lado (default BID)', ''],
+      ['--fields a,b,c', 'Campos CSV (default time,open,high,low,close,volume)', ''],
+      ['--out <file>', 'Salvar em arquivo', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api history csv --instrument EUR/USD --minutes 60 --out bars.csv
+`);
+    return;
+  }
+  console.log(`Uso:
+  dukascopy-api history ${sub}
+`);
+  printSection('Subcomandos disponíveis', SUBCOMMANDS.history);
+}
+
+function helpWs(sub) {
+  if (!sub) {
+    helpHeader();
+    console.log(`Uso:
+  dukascopy-api ws <subcomando> [opções]
+
+Subcomandos (descrição):
+`);
+    printTable([
+      ['tail', 'Imprime mensagens em tempo real.', ''],
+      ['stats', 'Mostra estatísticas (msgs/s).', ''],
+      ['dump', 'Salva mensagens em arquivo JSONL.', '']
+    ]);
+    console.log(`\nExemplos:
+  dukascopy-api ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+  dukascopy-api ws stats --type orderbook
+  dukascopy-api ws dump --type orderbook --out dump.jsonl
+`);
+    return;
+  }
+  if (sub === 'tail') {
+    console.log(`Uso:
+  dukascopy-api ws tail [--type <t>] [--instrument <inst>] [--limit <n>] [--duration <s>] [--pretty]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.ws);
+    printSection('Opções', [
+      ['--type <t>', 'Tipo (ex.: orderbook)', ''],
+      ['--instrument <inst>', 'Instrumento (ex.: EURUSD)', ''],
+      ['--limit <n>', 'Para após N mensagens', ''],
+      ['--duration <s>', 'Para após N segundos', ''],
+      ['--pretty', 'Formata a saída JSON', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+`);
+    return;
+  }
+  if (sub === 'stats') {
+    console.log(`Uso:
+  dukascopy-api ws stats [--type <t>] [--instrument <inst>] [--duration <s>]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.ws);
+    printSection('Opções', [
+      ['--type <t>', 'Tipo (ex.: orderbook)', ''],
+      ['--instrument <inst>', 'Instrumento (ex.: EURUSD)', ''],
+      ['--duration <s>', 'Para após N segundos', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api ws stats --type orderbook
+`);
+    return;
+  }
+  if (sub === 'dump') {
+    console.log(`Uso:
+  dukascopy-api ws dump --out <file> [--type <t>] [--instrument <inst>] [--limit <n>] [--duration <s>]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.ws);
+    printSection('Opções', [
+      ['--out <file>', 'Obrigatório (arquivo JSONL)', ''],
+      ['--type <t>', 'Tipo (ex.: orderbook)', ''],
+      ['--instrument <inst>', 'Instrumento (ex.: EURUSD)', ''],
+      ['--limit <n>', 'Para após N mensagens', ''],
+      ['--duration <s>', 'Para após N segundos', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api ws dump --type orderbook --out dump.jsonl
+`);
+    return;
+  }
+  console.log(`Uso:
+  dukascopy-api ws ${sub}
+`);
+  printSection('Subcomandos disponíveis', SUBCOMMANDS.ws);
+}
+
+function helpRaw() {
+  helpHeader();
+  console.log(`Uso:
+  dukascopy-api raw --method GET --url <url> [--body <json>] [--pretty]
+`);
+  printSection('Opções', [
+    ['--method <M>', 'Método HTTP (GET/POST/...)', ''],
+    ['--url <url>', 'Obrigatório', ''],
+    ['--body <json>', 'Corpo JSON (para POST/PUT)', ''],
+    ['--pretty', 'Formata a saída JSON', '']
+  ]);
+  console.log(`\nExemplo:
+  dukascopy-api raw --method GET --url http://localhost:8080/api/instruments
+`);
+}
+
+function helpJson(sub) {
+  if (!sub) {
+    helpHeader();
+    console.log(`Uso:
+  dukascopy-api json <subcomando> [opções]
+
+Subcomandos (descrição):
+`);
+    printTable([
+      ['pretty', 'Formata/indenta JSON.', ''],
+      ['get', 'Extrai campo usando path.', '']
+    ]);
+    console.log(`\nExemplos:
+  cat file.json | dukascopy-api json pretty
+  cat file.json | dukascopy-api json get --path a.b[0].c
+`);
+    return;
+  }
+  if (sub === 'pretty') {
+    console.log(`Uso:
+  dukascopy-api json pretty [--in <arquivo>]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.json);
+    printSection('Opções', [
+      ['--in <arquivo>', 'Arquivo de entrada (ou stdin)', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api json pretty --in data.json
+`);
+    return;
+  }
+  if (sub === 'get') {
+    console.log(`Uso:
+  dukascopy-api json get --path <expr> [--in <arquivo>]
+`);
+    printSection('Subcomandos disponíveis', SUBCOMMANDS.json);
+    printSection('Opções', [
+      ['--path <expr>', 'Obrigatório (ex.: a.b[0].c)', ''],
+      ['--in <arquivo>', 'Arquivo de entrada (ou stdin)', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api json get --path a.b[0].c --in data.json
+`);
+    return;
+  }
+  console.log(`Uso:
+  dukascopy-api json ${sub}
+`);
+  printSection('Subcomandos disponíveis', SUBCOMMANDS.json);
+}
+
+function helpMt5() {
+  helpHeader();
+  console.log(`Uso:
+  dukascopy-api mt5 export [--out <dir>]
+`);
+  printSection('Subcomandos disponíveis', SUBCOMMANDS.mt5);
+  printSection('Variáveis de ambiente', [
+    ['MT5_DATA_DIRS', 'Lista de pastas de Terminal (separado por ; ou ,).', ''],
+    ['MT5_DATA_DIR', 'Uma pasta única (alternativa).', '']
+  ]);
+  printSection('Opções', [
+    ['--out <dir>', 'Diretório base (default ./mt5). Se não terminar com MQL5, será adicionado.', '']
+  ]);
+  console.log(`\nExemplo:
+  dukascopy-api mt5 export --out ./mt5
+`);
+}
+
+function failWithHelp(msg, helpFn) {
+  if (msg) process.stderr.write(`Erro: ${msg}\n`);
+  helpFn();
+  process.exit(2);
+}
+
 async function cmd_config(sub, args, cfgPath) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpConfig(); return; }
   const { path: p, data } = loadConfig(cfgPath);
-  if (sub === 'path') { console.log(p); return; }
+  if (sub === 'path') {
+    if (args.length) failWithHelp('config path não aceita argumentos.', () => helpConfig('path'));
+    console.log(p);
+    return;
+  }
   if (sub === 'init') {
+    if (args.length) failWithHelp('config init não aceita argumentos.', () => helpConfig('init'));
     const d = { ...data };
     if (!d.host) d.host = 'http://localhost:8080';
     if (!d.ws) d.ws = 'ws://localhost:8080/ws/market';
@@ -436,22 +1175,28 @@ async function cmd_config(sub, args, cfgPath) {
     console.log('OK');
     return;
   }
-  if (sub === 'show') { console.log(JSON.stringify(data, null, 2)); return; }
+  if (sub === 'show') {
+    if (args.length) failWithHelp('config show não aceita argumentos.', () => helpConfig('show'));
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
   if (sub === 'get') {
     const k = args[0];
-    if (!k) die('config get precisa de <chave>');
+    if (!k) failWithHelp('config get precisa de <chave>.', () => helpConfig('get'));
+    if (args.length > 1) failWithHelp('config get aceita apenas <chave>.', () => helpConfig('get'));
     console.log(data[k] ?? '');
     return;
   }
   if (sub === 'set') {
     const k = args[0], v = args[1];
-    if (!k || v === undefined) die('config set precisa de <chave> <valor>');
+    if (!k || v === undefined) failWithHelp('config set precisa de <chave> <valor>.', () => helpConfig('set'));
+    if (args.length > 2) failWithHelp('config set aceita apenas <chave> <valor>.', () => helpConfig('set'));
     const d = { ...data, [k]: v };
     saveConfig(cfgPath, d);
     console.log('OK');
     return;
   }
-  die(`config subcomando desconhecido: ${sub}`);
+  failWithHelp(`config subcomando desconhecido: ${sub}`, () => helpConfig());
 }
 
 function resolveHostWs(cliOpts, cfg) {
@@ -460,7 +1205,8 @@ function resolveHostWs(cliOpts, cfg) {
   return { host: ensureUrlNoTrailingSlash(host), ws };
 }
 
-async function cmd_doctor(cliOpts, cfgPath) {
+async function cmd_doctor(cliOpts, cfgPath, args) {
+  if (args && args.length) failWithHelp('doctor não aceita argumentos posicionais.', helpDoctor);
   const { data } = loadConfig(cfgPath);
   const { host, ws } = resolveHostWs(cliOpts, data);
 
@@ -528,20 +1274,21 @@ function pidAlive(pid) {
 }
 
 
-async function cmd_server(sub, cliOpts, cfgPath) {
+async function cmd_server(sub, cliOpts, cfgPath, args) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpServer(); return; }
   const baseDir = process.cwd();
   const rt = runtimeDirs(baseDir);
   mkdirp(rt.run); mkdirp(rt.log);
 
-  const envPath = path.join(baseDir, '.env');
-  const envText = readFileSafe(envPath) || '';
-  const envFromFile = envText ? parseDotEnv(envText) : {};
+  const envInfo = loadEnvFiles(baseDir);
+  const envMerged = envInfo.merged;
 
   // default port/address for all subcommands
-  const port = parseInt(cliOpts.port || process.env.SERVER_PORT || envFromFile.SERVER_PORT || '8080', 10) || 8080;
-  const address = cliOpts.address || process.env.SERVER_ADDRESS || envFromFile.SERVER_ADDRESS || '';
+  const port = parseInt(cliOpts.port || envMerged.SERVER_PORT || '8080', 10) || 8080;
+  const address = cliOpts.address || envMerged.SERVER_ADDRESS || '';
 
   if (sub === 'env') {
+    if (args.length) failWithHelp('server env não aceita argumentos.', () => helpServer('env'));
     const tpl =
 `# Credenciais dukascopy-api / JForex
 JFOREX_USER=SEU_USER
@@ -556,7 +1303,11 @@ SERVER_PORT=8080
 # SERVER_ADDRESS=0.0.0.0
 
 # Opcional: se o servidor estiver fora do WSL e o cliente dentro do WSL, ajuste o host de probe
-# HOST_OVERRIDE=127.0.0.1
+# HOST_OVERRIDE=host.docker.internal
+
+# MT5 export (pasta base do Terminal; o export grava em MQL5/Experts e MQL5/Indicators)
+# Você pode listar múltiplos Terminals separados por ; ou ,
+MT5_DATA_DIRS=C:\\Users\\pichau\\AppData\\Roaming\\MetaQuotes\\Terminal\\EDC2DBD7187032A6326EC5B7406951FA
 `;
     const out = path.join(baseDir, '.env.example');
     writeFileSafe(out, tpl);
@@ -564,17 +1315,44 @@ SERVER_PORT=8080
     return;
   }
 
+  if (sub === 'set') {
+    if (args.length) failWithHelp('server set não aceita argumentos posicionais.', () => helpServer('set'));
+    const updates = {};
+    if (cliOpts.user) updates.JFOREX_USER = String(cliOpts.user);
+    if (cliOpts.pass) updates.JFOREX_PASS = String(cliOpts.pass);
+    if (cliOpts.jnlp) updates.JFOREX_JNLP = String(cliOpts.jnlp);
+    if (cliOpts.instruments) updates.JFOREX_INSTRUMENTS = String(cliOpts.instruments);
+    if (cliOpts['book-depth'] || cliOpts.bookDepth) updates.JFOREX_BOOK_DEPTH = String(cliOpts['book-depth'] || cliOpts.bookDepth);
+    if (cliOpts.port) updates.SERVER_PORT = String(cliOpts.port);
+    if (cliOpts.address) updates.SERVER_ADDRESS = String(cliOpts.address);
+    if (cliOpts['host-override'] || cliOpts.hostOverride) updates.HOST_OVERRIDE = String(cliOpts['host-override'] || cliOpts.hostOverride);
+
+    const keys = Object.keys(updates);
+    if (!keys.length) {
+      failWithHelp('server set precisa de ao menos uma opção: --user --pass --jnlp --instruments --book-depth --port --address --host-override', () => helpServer('set'));
+    }
+
+    const next = { ...envInfo.local, ...envInfo.user, ...updates };
+    writeFileSafe(envInfo.userPath, serializeDotEnv(next));
+    if (fs.existsSync(envInfo.localPath)) {
+      writeFileSafe(envInfo.localPath, serializeDotEnv(next));
+    }
+    console.log(envInfo.userPath);
+    return;
+  }
+
   const jar = cliOpts.jar || findServerJarInDir(baseDir);
 
   // helper: probe REST to detect unmanaged running server
   async function probeRunning() {
-    const hostProbe = cliOpts.probeHost || envFromFile.HOST_OVERRIDE || '127.0.0.1';
+    const hostProbe = cliOpts.probeHost || envMerged.HOST_OVERRIDE || '127.0.0.1';
     const probeUrl = `http://${hostProbe}:${port}/api/instruments`;
     const r = await httpRequest('GET', probeUrl, {}, null, 1200).catch(() => null);
     return { ok: !!(r && r.status > 0), status: r ? r.status : 0, url: probeUrl };
   }
 
   if (sub === 'status') {
+    if (args.length) failWithHelp('server status não aceita argumentos.', () => helpServer('status'));
     const pid = serverReadPid(rt.pid);
     if (pid && pidAlive(pid)) {
       console.log(`RUNNING (managed) pid=${pid} port=${port}`);
@@ -588,6 +1366,7 @@ SERVER_PORT=8080
   }
 
   if (sub === 'logs') {
+    if (args.length) failWithHelp('server logs não aceita argumentos.', () => helpServer('logs'));
     const n = parseInt(cliOpts.n || '200', 10) || 200;
     const follow = !!cliOpts.follow;
     const content = readFileSafe(rt.logFile) || '';
@@ -610,6 +1389,7 @@ SERVER_PORT=8080
   }
 
   if (sub === 'down') {
+    if (args.length) failWithHelp('server down não aceita argumentos.', () => helpServer('down'));
     // First try managed pidfile
     const pid = serverReadPid(rt.pid);
     if (pid && pidAlive(pid)) {
@@ -693,37 +1473,39 @@ SERVER_PORT=8080
   }
 
   if (sub === 'run') {
+    if (args.length) failWithHelp('server run não aceita argumentos posicionais.', () => helpServer('run'));
     banner();
-    const args = ['-jar', jar, `--server.port=${port}`];
-    if (address) args.push(`--server.address=${address}`);
+    const javaArgs = ['-jar', jar, `--server.port=${port}`];
+    if (address) javaArgs.push(`--server.address=${address}`);
     const dd = cliOpts['--'] || [];
-    args.push(...dd);
-    const childEnv = { ...process.env, ...envFromFile };
-    const p = spawn('java', args, { stdio: 'inherit', env: childEnv });
+    javaArgs.push(...dd);
+    const childEnv = envMerged;
+    const p = spawn('java', javaArgs, { stdio: 'inherit', env: childEnv });
     p.on('exit', (code) => process.exit(code ?? 0));
     return;
   }
 
   if (sub === 'up') {
+    if (args.length) failWithHelp('server up não aceita argumentos posicionais.', () => helpServer('up'));
     const pid0 = serverReadPid(rt.pid);
     if (pid0 && pidAlive(pid0)) { console.log(`OK (já rodando pid=${pid0})`); return; }
     if (pid0 && !pidAlive(pid0)) { try { fs.unlinkSync(rt.pid); } catch {} }
 
-    if (!envFromFile.JFOREX_USER || !envFromFile.JFOREX_PASS) {
+    if (!envMerged.JFOREX_USER || !envMerged.JFOREX_PASS) {
       warn('JFOREX_USER/JFOREX_PASS não estão no .env (o servidor pode subir, mas não vai gerar dados Dukascopy).');
     }
 
     writeFileSafe(rt.logFile, '');
 
-    const args = ['-jar', jar, `--server.port=${port}`];
-    if (address) args.push(`--server.address=${address}`);
+    const javaArgs = ['-jar', jar, `--server.port=${port}`];
+    if (address) javaArgs.push(`--server.address=${address}`);
     const dd = cliOpts['--'] || [];
-    args.push(...dd);
+    javaArgs.push(...dd);
 
     const outFd = fs.openSync(rt.logFile, 'a');
-    const childEnv = { ...process.env, ...envFromFile };
+    const childEnv = envMerged;
 
-    const child = spawn('java', args, {
+    const child = spawn('java', javaArgs, {
       cwd: baseDir,
       env: childEnv,
       detached: true,
@@ -738,15 +1520,20 @@ SERVER_PORT=8080
     return;
   }
 
-  die(`server subcomando desconhecido: ${sub}`);
+  failWithHelp(`server subcomando desconhecido: ${sub}`, () => helpServer());
 }
 
 
-async function cmd_instruments(sub, cliOpts, cfgPath) {
+async function cmd_instruments(sub, cliOpts, cfgPath, args) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpInstruments(); return; }
+  if (sub !== 'list' && sub !== 'set' && sub !== 'add' && sub !== 'remove') {
+    failWithHelp(`instruments subcomando desconhecido: ${sub}`, () => helpInstruments());
+  }
   const { data } = loadConfig(cfgPath);
   const { host } = resolveHostWs(cliOpts, data);
 
   if (sub === 'list') {
+    if (args.length) failWithHelp('instruments list não aceita argumentos.', () => helpInstruments('list'));
     const r = await httpRequest('GET', `${host}/api/instruments`);
     if (r.status < 200 || r.status >= 300) die(`HTTP ${r.status}: ${r.body}`);
     console.log(cliOpts.pretty ? prettyJson(r.body) : r.body);
@@ -754,9 +1541,10 @@ async function cmd_instruments(sub, cliOpts, cfgPath) {
   }
 
   // parse list argument (first positional)
-  const listArg = cliOpts.list || cliOpts._?.[0] || '';
+  const listArg = cliOpts.list || args[0] || '';
   const list = listArg.split(',').map(s => s.trim()).filter(Boolean);
-  if (!list.length) die('instruments set/add/remove precisa de uma lista "EURUSD,USDJPY"');
+  if (!list.length) failWithHelp('instruments set/add/remove precisa de uma lista "EURUSD,USDJPY".', () => helpInstruments(sub));
+  if (args.length > 1) failWithHelp('instruments aceita apenas uma lista (ex.: EURUSD,USDJPY).', () => helpInstruments(sub));
 
   if (sub === 'set') {
     const qs = encodeURIComponent(list.join(','));
@@ -789,13 +1577,18 @@ async function cmd_instruments(sub, cliOpts, cfgPath) {
     return;
   }
 
-  die(`instruments subcomando desconhecido: ${sub}`);
+  failWithHelp(`instruments subcomando desconhecido: ${sub}`, () => helpInstruments());
 }
 
-async function cmd_orderbook(sub, cliOpts, cfgPath) {
+async function cmd_orderbook(sub, cliOpts, cfgPath, args) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpOrderbook(); return; }
+  if (sub !== 'latest' && sub !== 'top' && sub !== 'levels' && sub !== 'watch') {
+    failWithHelp(`orderbook subcomando desconhecido: ${sub}`, () => helpOrderbook());
+  }
   const { data } = loadConfig(cfgPath);
   const { host } = resolveHostWs(cliOpts, data);
-  const instrument = normalizeInstrument(cliOpts.instrument || cliOpts._?.[0] || '');
+  const instrument = normalizeInstrument(cliOpts.instrument || args[0] || '');
+  if (args.length > 1) failWithHelp('orderbook aceita no máximo um instrumento como argumento.', () => helpOrderbook(sub));
 
   async function getOne() {
     const url = instrument ? `${host}/api/orderbook?instrument=${encodeURIComponent(instrument)}` : `${host}/api/orderbook`;
@@ -851,15 +1644,20 @@ async function cmd_orderbook(sub, cliOpts, cfgPath) {
     return;
   }
 
-  die(`orderbook subcomando desconhecido: ${sub}`);
+  failWithHelp(`orderbook subcomando desconhecido: ${sub}`, () => helpOrderbook());
 }
 
-async function cmd_history(sub, cliOpts, cfgPath) {
+async function cmd_history(sub, cliOpts, cfgPath, args) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpHistory(); return; }
+  if (sub !== 'bars' && sub !== 'csv') {
+    failWithHelp(`history subcomando desconhecido: ${sub}`, () => helpHistory());
+  }
   const { data } = loadConfig(cfgPath);
   const { host } = resolveHostWs(cliOpts, data);
 
-  const instrumentRaw = cliOpts.instrument || cliOpts._?.[0];
-  if (!instrumentRaw) die('history precisa de --instrument (ex.: EUR/USD)');
+  const instrumentRaw = cliOpts.instrument || args[0];
+  if (!instrumentRaw) failWithHelp('history precisa de --instrument (ex.: EUR/USD).', () => helpHistory(sub));
+  if (args.length > 1) failWithHelp('history aceita no máximo um instrumento como argumento.', () => helpHistory(sub));
   const instrument = instrumentRaw;
 
   const period = (cliOpts.period || 'M1').toUpperCase();
@@ -869,7 +1667,7 @@ async function cmd_history(sub, cliOpts, cfgPath) {
   let to = cliOpts.to ? parseInt(cliOpts.to, 10) : null;
   if (!from || !to) {
     const minutes = cliOpts.minutes ? parseInt(cliOpts.minutes, 10) : null;
-    if (!minutes) die('history precisa de --from/--to (epoch ms) ou --minutes N');
+    if (!minutes) failWithHelp('history precisa de --from/--to (epoch ms) ou --minutes N.', () => helpHistory(sub));
     to = nowMs();
     from = to - minutes * 60 * 1000;
   }
@@ -908,10 +1706,15 @@ async function cmd_history(sub, cliOpts, cfgPath) {
     return;
   }
 
-  die(`history subcomando desconhecido: ${sub}`);
+  failWithHelp(`history subcomando desconhecido: ${sub}`, () => helpHistory());
 }
 
-async function cmd_ws(sub, cliOpts, cfgPath) {
+async function cmd_ws(sub, cliOpts, cfgPath, args) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpWs(); return; }
+  if (args.length) failWithHelp('ws não aceita argumentos posicionais.', () => helpWs(sub));
+  if (sub !== 'tail' && sub !== 'dump' && sub !== 'stats') {
+    failWithHelp(`ws subcomando desconhecido: ${sub}`, () => helpWs());
+  }
   const { data } = loadConfig(cfgPath);
   const { ws } = resolveHostWs(cliOpts, data);
 
@@ -929,7 +1732,7 @@ async function cmd_ws(sub, cliOpts, cfgPath) {
   let outStream = null;
   if (sub === 'dump') {
     const out = cliOpts.out;
-    if (!out) die('ws dump precisa de --out arquivo');
+    if (!out) failWithHelp('ws dump precisa de --out arquivo.', () => helpWs('dump'));
     outStream = fs.createWriteStream(out, { flags: 'a' });
     process.stderr.write(`Dump -> ${out}\n`);
   }
@@ -1000,10 +1803,11 @@ async function cmd_ws(sub, cliOpts, cfgPath) {
   }
 }
 
-async function cmd_raw(cliOpts) {
+async function cmd_raw(cliOpts, args) {
+  if (args && args.length) failWithHelp('raw não aceita argumentos posicionais.', helpRaw);
   const method = (cliOpts.method || 'GET').toUpperCase();
   const url = cliOpts.url;
-  if (!url) die('raw precisa de --url');
+  if (!url) failWithHelp('raw precisa de --url.', helpRaw);
   let body = null;
   const headers = {};
   if (cliOpts.body) {
@@ -1015,7 +1819,9 @@ async function cmd_raw(cliOpts) {
   else process.stdout.write(r.body);
 }
 
-async function cmd_json(sub, cliOpts) {
+async function cmd_json(sub, cliOpts, args) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpJson(); return; }
+  if (args && args.length) failWithHelp('json não aceita argumentos posicionais.', () => helpJson(sub));
   const input = cliOpts.in ? readFileSafe(cliOpts.in) : null;
   const data = input !== null ? input : await new Promise((res) => {
     let s = '';
@@ -1030,7 +1836,7 @@ async function cmd_json(sub, cliOpts) {
   }
   if (sub === 'get') {
     const p = cliOpts.path;
-    if (!p) die('json get precisa de --path a.b[0].c');
+    if (!p) failWithHelp('json get precisa de --path a.b[0].c', () => helpJson('get'));
     let obj;
     try { obj = JSON.parse(data); } catch { die('entrada não é JSON'); }
     const v = jsonGetPath(obj, p);
@@ -1038,25 +1844,43 @@ async function cmd_json(sub, cliOpts) {
     else process.stdout.write(String(v ?? '') + '\n');
     return;
   }
-  die(`json subcomando desconhecido: ${sub}`);
+  failWithHelp(`json subcomando desconhecido: ${sub}`, () => helpJson());
 }
 
-async function cmd_mt5(sub, cliOpts) {
-  if (sub !== 'export') die('mt5 só suporta: export');
-  const out = cliOpts.out || path.join(process.cwd(), 'mt5');
-  mkdirp(out);
-  const expertsDir = path.join(out, 'Experts');
-  const indDir = path.join(out, 'Indicators');
-  mkdirp(expertsDir); mkdirp(indDir);
+async function cmd_mt5(sub, cliOpts, args) {
+  if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpMt5(); return; }
+  if (sub !== 'export') failWithHelp('mt5 só suporta: export.', helpMt5);
+  if (args.length) failWithHelp('mt5 export não aceita argumentos posicionais.', helpMt5);
+  const envInfo = loadEnvFiles(process.cwd());
+  const envMerged = envInfo.merged;
+
+  let targets = [];
+  if (cliOpts.out) {
+    targets = [cliOpts.out];
+  } else {
+    const list = envMerged.MT5_DATA_DIRS || envMerged.MT5_DATA_DIR || '';
+    if (list) targets = splitList(list);
+    else targets = [path.join(process.cwd(), 'mt5')];
+  }
+
+  const mql5Dirs = targets.map(ensureMql5Dir).filter(Boolean);
+  if (!mql5Dirs.length) failWithHelp('mt5 export: nenhum caminho válido encontrado.', helpMt5);
 
   const ea = MT5_EA_SOURCE;
   const ind = MT5_IND_SOURCE;
   if (!ea || !ind) die('Fonte do EA/Indicador não embutida nesta build.');
 
-  writeFileSafe(path.join(expertsDir, 'dukascopy-api_WS_Service_EA.mq5'), ea);
-  writeFileSafe(path.join(indDir, 'dukascopy-api_L2_VolumeProfile_GV.mq5'), ind);
+  for (const mql5 of mql5Dirs) {
+    mkdirp(mql5);
+    const expertsDir = path.join(mql5, 'Experts');
+    const indDir = path.join(mql5, 'Indicators');
+    mkdirp(expertsDir); mkdirp(indDir);
+    writeFileSafe(path.join(expertsDir, 'dukascopy-api_WS_Service_EA.mq5'), ea);
+    writeFileSafe(path.join(indDir, 'dukascopy-api_L2_VolumeProfile_GV.mq5'), ind);
+  }
 
-  console.log(out);
+  if (mql5Dirs.length === 1) console.log(mql5Dirs[0]);
+  else mql5Dirs.forEach(p => console.log(p));
 }
 
 // -------- Embedded MT5 sources (optional) --------
@@ -1724,40 +2548,66 @@ int OnCalculate(const int rates_total,
 // -------- main --------
 (async function main() {
   const argv = process.argv.slice(2);
-  if (argv.length === 0) { help(); return; }
+  if (argv.length === 0) { helpRoot(); return; }
+
+  const dd = argv.indexOf('--');
+  const argvNoDD = dd >= 0 ? argv.slice(0, dd) : argv;
+  const ddArgs = dd >= 0 ? argv.slice(dd + 1) : [];
 
   // Global flags
   const cfgPath = (() => {
-    const i = argv.indexOf('--config');
-    if (i >= 0 && argv[i + 1]) return argv[i + 1];
+    const i = argvNoDD.indexOf('--config');
+    if (i >= 0 && argvNoDD[i + 1]) return argvNoDD[i + 1];
     return null;
   })();
 
   // Extract --host/--ws for resolveHostWs
-  const cliOpts = parseArgs(argv);
+  const globalOpts = parseArgs(argvNoDD);
 
-  const cmd = argv[0];
-  const rest = argv.slice(1);
+  const cmd = argvNoDD[0];
+  let sub = argvNoDD[1];
+  let subArgv = argvNoDD.slice(2);
+  if (!sub || sub.startsWith('--')) {
+    sub = null;
+    subArgv = argvNoDD.slice(1);
+  }
+  const subOpts = parseArgs(subArgv);
+  const cliOpts = { ...globalOpts, ...subOpts, _: subOpts._ };
+  if (ddArgs.length) cliOpts['--'] = ddArgs;
+  const subArgs = subOpts._ || [];
 
-  if (cmd === 'help' || cmd === '-h' || cmd === '--help') { help(); return; }
-  if (cmd === 'version') { banner(); return; }
-
-  if (cmd === 'config') { await cmd_config(rest[0], rest.slice(1), cfgPath); return; }
-  if (cmd === 'doctor') { await cmd_doctor(cliOpts, cfgPath); return; }
-  if (cmd === 'server') {
-    // support: args after -- passed to java
-    const dd = argv.indexOf('--');
-    if (dd >= 0) cliOpts['--'] = argv.slice(dd + 1);
-    await cmd_server(rest[0], cliOpts, cfgPath);
+  if (cmd === 'help' || cmd === '-h' || cmd === '--help') {
+    const topic = sub;
+    const subtopic = subArgs[0];
+    if (!topic) { helpRoot(); return; }
+    if (topic === 'config') { helpConfig(subtopic); return; }
+    if (topic === 'doctor') { helpDoctor(); return; }
+    if (topic === 'server') { helpServer(subtopic); return; }
+    if (topic === 'instruments') { helpInstruments(subtopic); return; }
+    if (topic === 'orderbook') { helpOrderbook(subtopic); return; }
+    if (topic === 'history') { helpHistory(subtopic); return; }
+    if (topic === 'ws') { helpWs(subtopic); return; }
+    if (topic === 'raw') { helpRaw(); return; }
+    if (topic === 'json') { helpJson(subtopic); return; }
+    if (topic === 'mt5') { helpMt5(); return; }
+    helpRoot();
     return;
   }
-  if (cmd === 'instruments') { await cmd_instruments(rest[0], cliOpts, cfgPath); return; }
-  if (cmd === 'orderbook') { await cmd_orderbook(rest[0], cliOpts, cfgPath); return; }
-  if (cmd === 'history') { await cmd_history(rest[0], cliOpts, cfgPath); return; }
-  if (cmd === 'ws') { await cmd_ws(rest[0], cliOpts, cfgPath); return; }
-  if (cmd === 'raw') { await cmd_raw(cliOpts); return; }
-  if (cmd === 'json') { await cmd_json(rest[0], cliOpts); return; }
-  if (cmd === 'mt5') { await cmd_mt5(rest[0], cliOpts); return; }
+  if (cmd === 'version') { banner(); return; }
 
-  die(`Comando desconhecido: ${cmd}`);
+  if (cmd === 'config') { await cmd_config(sub, subArgs, cfgPath); return; }
+  if (cmd === 'doctor') { await cmd_doctor(cliOpts, cfgPath, subArgs); return; }
+  if (cmd === 'server') {
+    await cmd_server(sub, cliOpts, cfgPath, subArgs);
+    return;
+  }
+  if (cmd === 'instruments') { await cmd_instruments(sub, cliOpts, cfgPath, subArgs); return; }
+  if (cmd === 'orderbook') { await cmd_orderbook(sub, cliOpts, cfgPath, subArgs); return; }
+  if (cmd === 'history') { await cmd_history(sub, cliOpts, cfgPath, subArgs); return; }
+  if (cmd === 'ws') { await cmd_ws(sub, cliOpts, cfgPath, subArgs); return; }
+  if (cmd === 'raw') { await cmd_raw(cliOpts, subArgs); return; }
+  if (cmd === 'json') { await cmd_json(sub, cliOpts, subArgs); return; }
+  if (cmd === 'mt5') { await cmd_mt5(sub, cliOpts, subArgs); return; }
+
+  failWithHelp(`Comando desconhecido: ${cmd}`, helpRoot);
 })().catch(e => die(e?.stack || String(e)));

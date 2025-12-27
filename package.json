@@ -2,6 +2,9 @@
   "name": "dukascopy-api",
   "version": "1.0.0",
   "description": "Cross-platform Node.js CLI for JForex websocket+REST server",
+  "scripts": {
+    "release": "bash scripts/release.sh"
+  },
   "bin": {
     "dukascopy-api": "bin/dukascopy-api.js"
   },

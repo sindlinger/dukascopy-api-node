@@ -42,6 +42,26 @@ CLI fora do container (recomendado):
     dukascopy-api config set host http://localhost:8080
     dukascopy-api config set ws ws://localhost:8080/ws/market
 
+Uso local no WSL (servidor rodando no WSL):
+1) Instale o CLI no WSL:
+    npm install -g .
+2) Configure host/ws para o serviço local:
+    dukascopy-api config set host http://127.0.0.1:9999
+    dukascopy-api config set ws ws://127.0.0.1:9999/ws/market
+3) Teste via CLI:
+    dukascopy-api instruments list
+    dukascopy-api ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+
+Uso no Windows (CLI fora do WSL, servidor no WSL):
+1) Descubra o IP do WSL:
+    wsl ip route get 1.1.1.1 | wsl awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+2) Configure host/ws no Windows:
+    dukascopy-api config set host http://<IP_DO_WSL>:9999
+    dukascopy-api config set ws ws://<IP_DO_WSL>:9999/ws/market
+3) Teste via CLI:
+    dukascopy-api instruments list
+    dukascopy-api ws tail --type orderbook --instrument EURUSD --limit 20 --pretty
+
 Alias opcional (CLI dentro do container):
     dukascopy-api-docker() { docker compose exec dukascopy-api-node dukascopy-api --host http://127.0.0.1:8080 --ws ws://127.0.0.1:8080/ws/market "$@"; }
 
@@ -53,6 +73,9 @@ Exemplos:
     dukascopy-api config init
     dukascopy-api config set host http://localhost:8080
     dukascopy-api config set ws ws://localhost:8080/ws/market
+
+Nota:
+- Ao definir `host`, o `ws` é atualizado automaticamente para manter consistência.
 
 Servidor:
     dukascopy-api server env

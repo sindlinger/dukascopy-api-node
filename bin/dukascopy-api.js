@@ -105,13 +105,15 @@ function resolveEnvPath() {
 function loadEnvFiles(baseDir) {
   const userPath = resolveEnvPath();
   const localPath = path.join(baseDir, '.env');
-  const userText = readFileSafe(userPath) || '';
+  const override = process.env.DUKASCOPY_ENV_PATH || process.env.DUKASCOPY_ENV_FILE;
+  const overridePath = override ? expandHome(override) : null;
   const localText = readFileSafe(localPath) || '';
+  const userText = overridePath ? (readFileSafe(overridePath) || '') : '';
   const user = userText ? parseDotEnv(userText) : {};
   const local = localText ? parseDotEnv(localText) : {};
   const merged = { ...process.env, ...local, ...user };
-  const primaryPath = Object.keys(user).length ? userPath : localPath;
-  return { userPath, localPath, user, local, merged, primaryPath };
+  const primaryPath = overridePath || localPath;
+  return { userPath, localPath, user, local, merged, primaryPath, overridePath };
 }
 
 function loadConfig(cfgPath) {
@@ -205,6 +207,46 @@ function parseArgs(argv) {
   return out;
 }
 
+function parseGlobalArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--config' || a === '--host' || a === '--ws') {
+      const next = argv[i + 1];
+      if (!next || next.startsWith('--')) {
+        out[a.slice(2)] = true;
+      } else {
+        out[a.slice(2)] = next;
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith('--config=') || a.startsWith('--host=') || a.startsWith('--ws=')) {
+      const eq = a.indexOf('=');
+      out[a.slice(2, eq)] = a.slice(eq + 1);
+      continue;
+    }
+  }
+  return out;
+}
+
+function stripGlobalArgs(argv) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--config' || a === '--host' || a === '--ws') {
+      const next = argv[i + 1];
+      if (next && !next.startsWith('--')) i++;
+      continue;
+    }
+    if (a.startsWith('--config=') || a.startsWith('--host=') || a.startsWith('--ws=')) {
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
 function normalizeInstrument(s) {
   if (!s) return s;
   return s.replaceAll('/', '').trim().toUpperCase();
@@ -212,6 +254,17 @@ function normalizeInstrument(s) {
 
 function ensureUrlNoTrailingSlash(u) {
   return u.endsWith('/') ? u.slice(0, -1) : u;
+}
+
+function deriveWsFromHost(host) {
+  try {
+    const u = new URL(host);
+    const proto = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    const port = u.port ? `:${u.port}` : '';
+    return `${proto}//${u.hostname}${port}/ws/market`;
+  } catch {
+    return 'ws://localhost:8080/ws/market';
+  }
 }
 
 // -------- HTTP client (no deps) --------
@@ -628,6 +681,9 @@ Subcomandos (descrição):
       ['host', 'Base REST (ex.: http://localhost:8080)', ''],
       ['ws', 'Endpoint WS (ex.: ws://localhost:8080/ws/market)', '']
     ]);
+    console.log(`\nNota:
+  Ao definir host, o ws é atualizado automaticamente para manter consistência.
+`);
     console.log(`\nExemplos:
   dukascopy-api config set host http://localhost:8080
   dukascopy-api config set ws ws://localhost:8080/ws/market
@@ -673,10 +729,11 @@ Subcomandos (descrição):
       ['logs', 'Mostra logs e permite seguir em tempo real.', ''],
       ['run', 'Inicia em foreground (saída direta no terminal).', '']
     ]);
-    const envPath = resolveEnvPath();
-    const envInfo = process.env.DUKASCOPY_ENV_PATH || process.env.DUKASCOPY_ENV_FILE
-      ? 'Caminho via DUKASCOPY_ENV_PATH/DUKASCOPY_ENV_FILE'
-      : 'Caminho padrão (global)';
+    const override = process.env.DUKASCOPY_ENV_PATH || process.env.DUKASCOPY_ENV_FILE;
+    const envPath = override ? expandHome(override) : path.join(process.cwd(), '.env');
+    const envInfo = override
+      ? 'Caminho via DUKASCOPY_ENV_PATH/DUKASCOPY_ENV_FILE (override)'
+      : 'Caminho padrão (local do projeto)';
     printSection('Arquivo .env', [
       [envPath, envInfo, '']
     ]);
@@ -1192,6 +1249,9 @@ async function cmd_config(sub, args, cfgPath) {
     if (!k || v === undefined) failWithHelp('config set precisa de <chave> <valor>.', () => helpConfig('set'));
     if (args.length > 2) failWithHelp('config set aceita apenas <chave> <valor>.', () => helpConfig('set'));
     const d = { ...data, [k]: v };
+    if (k === 'host') {
+      d.ws = deriveWsFromHost(String(v));
+    }
     saveConfig(cfgPath, d);
     console.log('OK');
     return;
@@ -1201,7 +1261,9 @@ async function cmd_config(sub, args, cfgPath) {
 
 function resolveHostWs(cliOpts, cfg) {
   const host = cliOpts.host || cfg.host || 'http://localhost:8080';
-  const ws = cliOpts.ws || cfg.ws || 'ws://localhost:8080/ws/market';
+  let ws = cliOpts.ws || cfg.ws;
+  if (!ws) ws = deriveWsFromHost(host);
+  if (cliOpts.host && !cliOpts.ws) ws = deriveWsFromHost(host);
   return { host: ensureUrlNoTrailingSlash(host), ws };
 }
 
@@ -1333,11 +1395,9 @@ MT5_DATA_DIRS=C:\\Users\\pichau\\AppData\\Roaming\\MetaQuotes\\Terminal\\EDC2DBD
     }
 
     const next = { ...envInfo.local, ...envInfo.user, ...updates };
-    writeFileSafe(envInfo.userPath, serializeDotEnv(next));
-    if (fs.existsSync(envInfo.localPath)) {
-      writeFileSafe(envInfo.localPath, serializeDotEnv(next));
-    }
-    console.log(envInfo.userPath);
+    const targetPath = envInfo.primaryPath || envInfo.localPath;
+    writeFileSafe(targetPath, serializeDotEnv(next));
+    console.log(targetPath);
     return;
   }
 
@@ -2551,19 +2611,16 @@ int OnCalculate(const int rates_total,
   if (argv.length === 0) { helpRoot(); return; }
 
   const dd = argv.indexOf('--');
-  const argvNoDD = dd >= 0 ? argv.slice(0, dd) : argv;
+  const argvHead = dd >= 0 ? argv.slice(0, dd) : argv;
   const ddArgs = dd >= 0 ? argv.slice(dd + 1) : [];
 
+  const globalOpts = parseGlobalArgs(argvHead);
+  const argvNoDD = stripGlobalArgs(argvHead);
+
   // Global flags
-  const cfgPath = (() => {
-    const i = argvNoDD.indexOf('--config');
-    if (i >= 0 && argvNoDD[i + 1]) return argvNoDD[i + 1];
-    return null;
-  })();
+  const cfgPath = globalOpts.config || null;
 
   // Extract --host/--ws for resolveHostWs
-  const globalOpts = parseArgs(argvNoDD);
-
   const cmd = argvNoDD[0];
   let sub = argvNoDD[1];
   let subArgv = argvNoDD.slice(2);

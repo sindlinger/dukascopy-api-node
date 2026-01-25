@@ -103,16 +103,16 @@ function resolveEnvPath() {
 }
 
 function loadEnvFiles(baseDir) {
-  const userPath = resolveEnvPath();
-  const localPath = path.join(baseDir, '.env');
   const override = process.env.DUKASCOPY_ENV_PATH || process.env.DUKASCOPY_ENV_FILE;
   const overridePath = override ? expandHome(override) : null;
+  const userPath = overridePath || defaultEnvPath();
+  const localPath = path.join(baseDir, '.env');
   const localText = readFileSafe(localPath) || '';
-  const userText = overridePath ? (readFileSafe(overridePath) || '') : '';
+  const userText = readFileSafe(userPath) || '';
   const user = userText ? parseDotEnv(userText) : {};
   const local = localText ? parseDotEnv(localText) : {};
   const merged = { ...process.env, ...local, ...user };
-  const primaryPath = overridePath || localPath;
+  const primaryPath = userPath;
   return { userPath, localPath, user, local, merged, primaryPath, overridePath };
 }
 
@@ -558,6 +558,7 @@ const SUBCOMMANDS = {
     ['show', 'Mostra o config atual', ''],
     ['get', 'Lê uma chave', ''],
     ['set', 'Define uma chave', ''],
+    ['sync-env', 'Sincroniza host/ws a partir do .env', ''],
     ['path', 'Caminho do config', '']
   ],
   server: [
@@ -652,6 +653,7 @@ Subcomandos (descrição):
     ]);
     console.log(`\nExemplos:
   dukascopy-api config init
+  dukascopy-api config sync-env
   dukascopy-api config show
   dukascopy-api config get host
   dukascopy-api config set host http://localhost:8080
@@ -687,6 +689,23 @@ Subcomandos (descrição):
     console.log(`\nExemplos:
   dukascopy-api config set host http://localhost:8080
   dukascopy-api config set ws ws://localhost:8080/ws/market
+`);
+    return;
+  }
+  if (sub === 'sync-env') {
+    console.log(`Uso:
+  dukascopy-api config sync-env
+`);
+    printSection('Descrição', [
+      ['Lê o .env (global + local) e ajusta host/ws automaticamente.', '', '']
+    ]);
+    printSection('Variáveis usadas', [
+      ['SERVER_PORT', 'porta do servidor', ''],
+      ['HOST_OVERRIDE', 'host preferido (ex.: host.docker.internal)', ''],
+      ['SERVER_ADDRESS', 'fallback de host', '']
+    ]);
+    console.log(`\nExemplo:
+  dukascopy-api config sync-env
 `);
     return;
   }
@@ -730,12 +749,12 @@ Subcomandos (descrição):
       ['run', 'Inicia em foreground (saída direta no terminal).', '']
     ]);
     const override = process.env.DUKASCOPY_ENV_PATH || process.env.DUKASCOPY_ENV_FILE;
-    const envPath = override ? expandHome(override) : path.join(process.cwd(), '.env');
-    const envInfo = override
-      ? 'Caminho via DUKASCOPY_ENV_PATH/DUKASCOPY_ENV_FILE (override)'
-      : 'Caminho padrão (local do projeto)';
+    const overridePath = override ? expandHome(override) : null;
+    const globalPath = overridePath || defaultEnvPath();
+    const localPath = path.join(process.cwd(), '.env');
     printSection('Arquivo .env', [
-      [envPath, envInfo, '']
+      [globalPath, overridePath ? 'Caminho via DUKASCOPY_ENV_PATH/DUKASCOPY_ENV_FILE (override)' : 'Caminho global (padrão)', ''],
+      [localPath, 'Caminho local do projeto (sync)', '']
     ]);
     console.log(`\nExemplos:
   dukascopy-api server env
@@ -1215,6 +1234,15 @@ function failWithHelp(msg, helpFn) {
   process.exit(2);
 }
 
+function buildHostFromEnv(envMerged) {
+  const port = parseInt(envMerged.SERVER_PORT || '8080', 10) || 8080;
+  let base = (envMerged.HOST_OVERRIDE || envMerged.SERVER_HOST || envMerged.SERVER_ADDRESS || '').trim();
+  if (!base || base === '0.0.0.0' || base === '::') base = '127.0.0.1';
+  if (/^https?:\/\//i.test(base)) return ensureUrlNoTrailingSlash(base);
+  if (base.includes(':')) return ensureUrlNoTrailingSlash(`http://${base}`);
+  return ensureUrlNoTrailingSlash(`http://${base}:${port}`);
+}
+
 async function cmd_config(sub, args, cfgPath) {
   if (!sub || sub === 'help' || sub === '-h' || sub === '--help') { helpConfig(); return; }
   const { path: p, data } = loadConfig(cfgPath);
@@ -1235,6 +1263,15 @@ async function cmd_config(sub, args, cfgPath) {
   if (sub === 'show') {
     if (args.length) failWithHelp('config show não aceita argumentos.', () => helpConfig('show'));
     console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  if (sub === 'sync-env') {
+    if (args.length) failWithHelp('config sync-env não aceita argumentos.', () => helpConfig('sync-env'));
+    const envInfo = loadEnvFiles(process.cwd());
+    const host = buildHostFromEnv(envInfo.merged || {});
+    const d = { ...data, host, ws: deriveWsFromHost(host) };
+    saveConfig(cfgPath, d);
+    console.log(JSON.stringify({ host: d.host, ws: d.ws }, null, 2));
     return;
   }
   if (sub === 'get') {
@@ -1395,9 +1432,15 @@ MT5_DATA_DIRS=C:\\Users\\pichau\\AppData\\Roaming\\MetaQuotes\\Terminal\\EDC2DBD
     }
 
     const next = { ...envInfo.local, ...envInfo.user, ...updates };
-    const targetPath = envInfo.primaryPath || envInfo.localPath;
+    const targetPath = envInfo.primaryPath || envInfo.userPath || envInfo.localPath;
     writeFileSafe(targetPath, serializeDotEnv(next));
-    console.log(targetPath);
+    // Keep local .env in sync (if it already exists) for docker-compose usage.
+    if (envInfo.localPath && envInfo.localPath !== targetPath && fs.existsSync(envInfo.localPath)) {
+      writeFileSafe(envInfo.localPath, serializeDotEnv(next));
+      console.log(`${targetPath}\n${envInfo.localPath}`);
+    } else {
+      console.log(targetPath);
+    }
     return;
   }
 

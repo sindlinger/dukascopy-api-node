@@ -8,7 +8,6 @@ WORKDIR /app
 
 COPY bin ./bin
 COPY docs ./docs
-COPY mt5 ./mt5
 COPY dukascopy-api.js package.json README.md .env.example jforex-websocket-api-1.0.0.jar ./
 
 RUN npm install -g .

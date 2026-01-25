@@ -5,5 +5,10 @@
 .runtime
 dist
 node_modules
+**/node_modules
+**/node_modules/.bin
+**/.bin
+mt5
+tmp-mt5-test
 scripts
 *.log

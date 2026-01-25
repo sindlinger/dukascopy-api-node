@@ -11,6 +11,10 @@ Seu servidor Spring Boot envia mensagens JSON no WebSocket /ws/market (tick e or
 
 {"type":"orderbook","instrument":"EURUSD",...,"bids":[...],"asks":[...]}
 
+Observação importante (JNLP JForex 3):
+- DEMO: http://platform.dukascopy.com/demo_3/jforex_3.jnlp
+- LIVE: http://platform.dukascopy.com/live_3/jforex_3.jnlp
+
 B) EA “serviço” (dentro do MT5): JXAPI_WS_Service_EA.mq5
 Esse EA é o componente que realmente “pega WebSocket”.
 

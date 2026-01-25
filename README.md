@@ -26,6 +26,10 @@ Docker (imagem para servidor):
     cp .env.example .env
     dukascopy-api server set --user SEU_USER --pass SUA_SENHA --jnlp URL --instruments EUR/USD,USD/JPY
 
+    # JNLP (JForex 3) — escolha DEMO ou LIVE:
+    # DEMO: http://platform.dukascopy.com/demo_3/jforex_3.jnlp
+    # LIVE: http://platform.dukascopy.com/live_3/jforex_3.jnlp
+
 2) (Opcional) Centralize o .env fora do projeto:
     export DUKASCOPY_ENV_FILE=~/.config/dukascopy-api/.env
     # ou um caminho absoluto de sua preferência
@@ -39,6 +43,7 @@ Docker (imagem para servidor):
 
 CLI fora do container (recomendado):
     npm install -g .
+    dukascopy-api config sync-env
     dukascopy-api config set host http://localhost:8080
     dukascopy-api config set ws ws://localhost:8080/ws/market
 
